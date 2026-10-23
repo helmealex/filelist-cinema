@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#141414" />
+    <title>FileList Cinema</title>
+    <link rel="icon" type="image/png" href="icon.png" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header id="nav" class="nav">
+      <button class="logo" id="logo" type="button" aria-label="Home">FILELIST<span>cinema</span></button>
+      <nav class="nav-links">
+        <button type="button" class="nav-link active" data-view="home">Home</button>
+        <button type="button" class="nav-link" id="navDownloads">My downloads <span id="downloadsCount" class="count">0</span></button>
+      </nav>
+      <div class="nav-right">
+        <button type="button" id="settingsBtn" class="icon-btn" aria-label="Settings" title="Settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" /></svg>
+        </button>
+        <form id="searchForm" class="search" role="search">
+          <button type="button" id="searchToggle" class="icon-btn" aria-label="Search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+          </button>
+          <input id="searchInput" type="search" placeholder="Titles, IMDb id (tt…)" autocomplete="off" />
+        </form>
+      </div>
+    </header>
+
+    <!-- Home: hero + rows -->
+    <main id="homeView">
+      <section id="hero" class="hero is-loading" aria-live="polite">
+        <div class="hero-bg"><div class="hero-img" id="heroImg"></div></div>
+        <div class="hero-content">
+          <div class="hero-text">
+            <div class="hero-kicker" id="heroKicker">Featured</div>
+            <h1 id="heroTitle" class="hero-title"></h1>
+            <div id="heroMeta" class="meta-line"></div>
+            <p id="heroStars" class="hero-stars"></p>
+            <div class="hero-actions">
+              <button id="heroPrimary" type="button" class="btn btn-light"></button>
+              <button id="heroInfo" type="button" class="btn btn-glass">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7.5v.5" /></svg>
+                More info
+              </button>
+            </div>
+          </div>
+          <img id="heroPoster" class="hero-poster" alt="" />
+        </div>
+        <div class="hero-dots" id="heroDots"></div>
+      </section>
+      <div id="rows" class="rows"></div>
+    </main>
+
+    <!-- Search results -->
+    <main id="searchView" class="search-view" hidden>
+      <div class="search-head">
+        <h2 id="searchTitle">Search</h2>
+        <select id="categorySelect" aria-label="Category"><option value="">All movie categories</option></select>
+      </div>
+      <div id="status" class="status"></div>
+      <section id="grid" class="grid"></section>
+      <div id="sentinel" class="sentinel"></div>
+    </main>
+
+    <div id="toast" class="toast" role="status"></div>
+
+    <!-- Movie details -->
+    <dialog id="detailsDialog" class="modal details">
+      <div class="details-hero">
+        <div class="details-bg" id="detailsBg"></div>
+        <button class="close-round" data-close aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+        </button>
+        <div class="details-head">
+          <div>
+            <h2 id="detailsTitle"></h2>
+            <div class="details-actions">
+              <button id="detailsAction" type="button" class="btn btn-light"></button>
+              <a id="detailsImdb" class="btn btn-glass" target="_blank" rel="noreferrer">IMDb</a>
+            </div>
+            <div id="detailsProgress" class="progress hidden"><div></div></div>
+            <p id="detailsNote" class="note"></p>
+          </div>
+          <img id="detailsPoster" class="details-poster" alt="" />
+        </div>
+      </div>
+      <div class="details-body">
+        <div class="details-main">
+          <div id="detailsMeta" class="meta-line"></div>
+          <div id="detailsTags" class="tags"></div>
+          <p id="detailsDesc" class="desc"></p>
+          <div id="detailsVersionsBox" class="versions-box hidden">
+            <h3>Versions</h3>
+            <div id="detailsVersions" class="versions"></div>
+          </div>
+        </div>
+        <dl class="details-side">
+          <div><dt>Starring</dt><dd id="detailsStars">–</dd></div>
+          <div><dt>Category</dt><dd id="detailsCategory">–</dd></div>
+          <div><dt>Swarm</dt><dd id="detailsSwarm">–</dd></div>
+          <div><dt>Added</dt><dd id="detailsAdded">–</dd></div>
+        </dl>
+      </div>
+      <p id="detailsRelease" class="release"></p>
+    </dialog>
+
+    <!-- Downloads drawer -->
+    <aside id="drawer" class="drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <h2>My downloads</h2>
+        <button class="close-round" id="drawerClose" aria-label="Close">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+        </button>
+      </div>
+      <div id="downloadsList" class="downloads"></div>
+    </aside>
+    <div id="scrim" class="scrim"></div>
+
+    <!-- First-run setup -->
+    <dialog id="setupDialog" class="modal setup">
+      <form id="setupForm" class="setup-form">
+        <div class="logo setup-logo">FILELIST<span>cinema</span></div>
+        <h2 id="setupTitle">Welcome! Let's connect your accounts.</h2>
+        <p class="note">Saved to the <code>.env</code> file next to the app. Nothing leaves this computer except the logins themselves.</p>
+        <fieldset>
+          <legend>FileList</legend>
+          <label>Username <input name="username" autocomplete="username" required /></label>
+          <label>Password <input name="password" type="password" autocomplete="current-password" /></label>
+          <label>…or passkey <small>(official API instead of the website login)</small><input name="passkey" autocomplete="off" /></label>
+          <p class="note error" data-error="filelist"></p>
+        </fieldset>
+        <fieldset>
+          <legend>qBittorrent Web UI</legend>
+          <label>Address <input name="qbitUrl" /></label>
+          <label>Username <input name="qbitUsername" /></label>
+          <label>Password <input name="qbitPassword" type="password" /></label>
+          <p class="note">In qBittorrent: Tools → Options → Web UI → enable it and set a username and password.</p>
+          <p class="note error" data-error="qbit"></p>
+        </fieldset>
+        <fieldset>
+          <legend>OpenSubtitles <small>(optional)</small></legend>
+          <p class="note">Finds subtitles (Romanian first) in seconds. Free API key: opensubtitles.com → profile → API consumers.</p>
+          <label>API key <input name="opensubtitlesKey" autocomplete="off" /></label>
+          <label>Username <small>(raises the daily download limit)</small><input name="opensubtitlesUsername" autocomplete="off" /></label>
+          <label>Password <input name="opensubtitlesPassword" type="password" autocomplete="off" /></label>
+        </fieldset>
+        <div class="setup-actions">
+          <button type="button" id="setupCancel" class="btn btn-glass" hidden>Cancel</button>
+          <button type="submit" class="btn btn-light">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Player -->
+    <dialog id="playerDialog" class="player">
+      <div class="player-top">
+        <button class="icon-btn back" data-close aria-label="Back">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
+        </button>
+        <h3 id="playerTitle"></h3>
+        <button id="startOver" type="button" class="btn btn-glass small hidden">↺ Start over</button>
+        <button id="settingsToggle" type="button" class="icon-btn" aria-label="Playback settings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></svg>
+        </button>
+      </div>
+      <div class="player-stage">
+        <video id="video" controls autoplay playsinline crossorigin="anonymous" tabindex="0"></video>
+        <div id="osd" class="osd"></div>
+      </div>
+      <div id="seekBar" class="seekbar hidden">
+        <input id="seekRange" type="range" min="0" value="0" step="1" aria-label="Position" />
+        <span id="seekTime">0:00 / 0:00</span>
+      </div>
+      <div id="settingsPanel" class="settings hidden">
+        <label id="fileLabel">File <select id="fileSelect"></select></label>
+        <label id="qualityLabel" class="hidden">Quality <select id="qualitySelect"></select></label>
+        <label>Subtitles <select id="subsSelect"><option value="">Off</option></select></label>
+        <span id="subsDelayBox" class="delay hidden" title="Keyboard: G / H">
+          Sync
+          <button class="btn btn-glass small" type="button" data-delay="-0.5">−</button>
+          <span id="subsDelay">0.0s</span>
+          <button class="btn btn-glass small" type="button" data-delay="0.5">+</button>
+        </span>
+        <button id="subsAdd" class="btn btn-glass small" type="button" title="Or drag a subtitle file onto the player">+ Add subtitles</button>
+        <button id="subsRemove" class="btn btn-glass small danger hidden" type="button">Remove subtitle file</button>
+        <input id="subsFile" type="file" accept=".srt,.vtt,.ass,.ssa,.sub" hidden />
+      </div>
+      <div class="player-notes">
+        <p id="subsNote" class="note"></p>
+        <p id="playerNote" class="note"></p>
+      </div>
+      <div class="drop-hint">Drop a subtitle file (.srt, .vtt, .ass, .ssa, .sub)</div>
+    </dialog>
+
+    <script src="vendor/hls.min.js"></script>
+    <script src="app.js" type="module"></script>
+  </body>
+</html>
