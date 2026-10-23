@@ -221,7 +221,19 @@ impl Library {
             println!("[qbit] no video playing: downloads resumed");
             return Ok(true);
         }
-        let hashes: Vec<String> = self.layouts.read().unwrap().values().map(|l| l.hash.clone()).collect();
+        let hashes: Vec<String> = {
+            let entries = self.entries.read().unwrap();
+            self.layouts
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| entries.get(*id).is_some_and(|e| e["done"] != json!(true)))
+                .map(|(_, l)| l.hash.clone())
+                .collect()
+        };
+        if hashes.is_empty() {
+            return Ok(false); // everything is downloaded
+        }
         let infos = self.qbit.infos(&hashes).await?;
         let to_stop: Vec<String> = {
             let held = self.held.lock().unwrap();
@@ -264,21 +276,122 @@ impl Library {
             let layouts = self.layouts.read().unwrap();
             self.entries.read().unwrap().keys().filter_map(|id| layouts.get(id).map(|l| (id.clone(), l.hash.clone()))).collect()
         };
-        let hashes: Vec<String> = ids.iter().map(|(_, h)| h.clone()).collect();
-        let (infos, error) = match self.qbit.infos(&hashes).await {
-            Ok(i) => (i, None),
-            Err(e) => (vec![], Some(format!("{e:#}"))),
-        };
-        self.checking_count
-            .store(infos.iter().filter(|i| is_checking(i["state"].as_str().unwrap_or(""))).count(), Ordering::Relaxed);
-        // ask qBittorrent about all torrents at once: one slow answer shouldn't delay the others
-        let statuses = ids.iter().map(|(id, hash)| {
-            let info = infos.iter().find(|i| i["hash"] == hash.as_str());
-            self.status(id, info, error.as_deref())
-        });
-        let mut out = futures_util::future::join_all(statuses).await;
+        // finished downloads come from library.json; only the others need qBittorrent
+        let mut out = Vec::new();
+        let mut pending = Vec::new();
+        for (id, hash) in ids {
+            match self.completed(&id) {
+                Some(entry) if completed_files_exist(&entry).await => out.push(completed_status(entry)),
+                Some(_) => {
+                    eprintln!("[library] {id}: the downloaded files are gone from disk, asking qBittorrent again");
+                    self.forget_completed(&id);
+                    pending.push((id, hash));
+                }
+                None => pending.push((id, hash)),
+            }
+        }
+        if !pending.is_empty() {
+            let hashes: Vec<String> = pending.iter().map(|(_, h)| h.clone()).collect();
+            let (infos, error) = match self.qbit.infos(&hashes).await {
+                Ok(i) => (i, None),
+                Err(e) => (vec![], Some(format!("{e:#}"))),
+            };
+            self.checking_count
+                .store(infos.iter().filter(|i| is_checking(i["state"].as_str().unwrap_or(""))).count(), Ordering::Relaxed);
+            // ask qBittorrent about all torrents at once: one slow answer shouldn't delay the others
+            let statuses = pending.iter().map(|(id, hash)| {
+                let info = infos.iter().find(|i| i["hash"] == hash.as_str());
+                self.status(id, info, error.as_deref())
+            });
+            for status in futures_util::future::join_all(statuses).await {
+                if status["done"] == json!(true) && status["checking"] != json!(true) {
+                    let info = infos.iter().find(|i| i["hash"] == status["hash"]);
+                    if let Some(info) = info {
+                        self.record_completed(&status, info).await;
+                    }
+                }
+                out.push(status);
+            }
+        } else {
+            self.checking_count.store(0, Ordering::Relaxed);
+        }
         out.sort_by_key(|d| std::cmp::Reverse(d["addedAt"].as_u64().unwrap_or(0)));
         out
+    }
+
+    // ---------- finished downloads, remembered in library.json ----------
+
+    /// The library entry of a finished download (its files and where they are on disk), if it is one.
+    fn completed(&self, id: &str) -> Option<Value> {
+        self.entry(id).filter(|e| e["done"] == json!(true))
+    }
+
+    /// Save a just-finished download: from now on its status and files come from library.json.
+    async fn record_completed(&self, status: &Value, info: &Value) {
+        let Some(id) = status["id"].as_str() else { return };
+        let on_disk = |files: &Value| {
+            let files = files.as_array().cloned().unwrap_or_default();
+            async move {
+                let mut out = Vec::new();
+                for mut f in files {
+                    if f["progress"].as_f64().unwrap_or(0.0) < 1.0 {
+                        continue; // not wanted (skipped in qBittorrent)
+                    }
+                    let Some(disk) = resolve_disk_path(info, f["path"].as_str().unwrap_or("")).await else { continue };
+                    if disk.extension().is_some_and(|e| e == "!qB") {
+                        continue;
+                    }
+                    f["disk"] = json!(disk.to_string_lossy());
+                    out.push(f);
+                }
+                out
+            }
+        };
+        let videos = on_disk(&status["videos"]).await;
+        let subtitles = on_disk(&status["subtitles"]).await;
+        if videos.is_empty() {
+            return; // nothing playable found on disk: keep asking qBittorrent
+        }
+        if let Some(entry) = self.entries.write().unwrap().get_mut(id).and_then(Value::as_object_mut) {
+            entry.extend([
+                ("done".into(), json!(true)),
+                ("completedAt".into(), json!(now_ms())),
+                ("name".into(), status["name"].clone()),
+                ("length".into(), status["length"].clone()),
+                ("videos".into(), json!(videos)),
+                ("subtitles".into(), json!(subtitles)),
+            ]);
+        }
+        self.save();
+        println!("[library] {id}: download finished, saved to library.json");
+    }
+
+    fn forget_completed(&self, id: &str) {
+        if let Some(entry) = self.entries.write().unwrap().get_mut(id).and_then(Value::as_object_mut) {
+            for key in ["done", "completedAt", "length", "videos", "subtitles"] {
+                entry.remove(key);
+            }
+        }
+        self.save();
+    }
+
+    /// A file of a finished download, by its index in the torrent.
+    fn completed_file(&self, id: &str, index: u64) -> Option<Value> {
+        let entry = self.completed(id)?;
+        ["videos", "subtitles"]
+            .iter()
+            .flat_map(|k| entry[*k].as_array().cloned().unwrap_or_default())
+            .find(|f| f["index"].as_u64() == Some(index))
+    }
+
+    /// Where a finished download's file is on disk (by its path inside the torrent).
+    fn completed_disk(&self, id: &str, name: &str) -> Option<PathBuf> {
+        let entry = self.completed(id)?;
+        ["videos", "subtitles"]
+            .iter()
+            .flat_map(|k| entry[*k].as_array().cloned().unwrap_or_default())
+            .find(|f| f["path"] == name)
+            .and_then(|f| f["disk"].as_str().map(PathBuf::from))
     }
 
     /// The library as known from library.json, before qBittorrent has answered (shown instantly at startup).
@@ -289,6 +402,9 @@ impl Library {
             .unwrap()
             .values()
             .map(|e| {
+                if e["done"] == json!(true) {
+                    return completed_status(e.clone());
+                }
                 let mut v = e.clone();
                 if let Some(obj) = v.as_object_mut() {
                     obj.extend([
@@ -381,6 +497,7 @@ impl Library {
         let subtitles: Vec<Value> =
             files.iter().filter(|f| SUB_EXT.contains(&f["ext"].as_str().unwrap_or(""))).cloned().collect();
         obj.extend([
+            ("hash".into(), json!(hash)),
             ("name".into(), info["name"].clone()),
             ("ready".into(), json!(!files.is_empty())),
             ("state".into(), json!(state)),
@@ -420,14 +537,19 @@ impl Library {
 
     pub async fn file(&self, id: &str, index: u64) -> Option<TorrentFile> {
         let layout = self.layout(id)?;
-        let files = self.qbit.files(&layout.hash).await.ok()?;
-        let f = files.iter().find(|f| f["index"].as_u64() == Some(index))?;
-        let name = f["name"].as_str()?.to_string();
+        let (name, size) = match self.completed_file(id, index) {
+            Some(f) => (f["path"].as_str()?.to_string(), f["length"].as_u64().unwrap_or(0)),
+            None => {
+                let files = self.qbit.files(&layout.hash).await.ok()?;
+                let f = files.iter().find(|f| f["index"].as_u64() == Some(index))?;
+                (f["name"].as_str()?.to_string(), f["size"].as_u64().unwrap_or(0))
+            }
+        };
         Some(TorrentFile {
             id: id.to_string(),
             offset: layout.offsets.get(&name).copied(),
             hash: layout.hash.clone(),
-            size: f["size"].as_u64().unwrap_or(0),
+            size,
             piece_length: layout.piece_length,
             name,
         })
@@ -435,6 +557,10 @@ impl Library {
 
     /// Path on disk of a fully downloaded *and verified* file, or None.
     pub async fn local_path(&self, id: &str, index: u64) -> Option<PathBuf> {
+        if let Some(f) = self.completed_file(id, index) {
+            let disk = PathBuf::from(f["disk"].as_str()?);
+            return tokio::fs::metadata(&disk).await.is_ok().then_some(disk);
+        }
         let file = self.file(id, index).await?;
         let info = self.qbit.info(&file.hash).await.ok()??;
         // while qBittorrent (re)checks a torrent, the file progress it reports is not trustworthy
@@ -492,11 +618,20 @@ impl Library {
             }
             let chunk_end = s.end.min(s.pos + CHUNK - 1);
             let result: Result<Bytes> = async {
-                let info = s.lib.wait_for_range(&s.file, s.pos, chunk_end).await?;
+                // finished downloads: the path saved in library.json, no need to ask qBittorrent
+                let completed = s.lib.completed_disk(&s.file.id, &s.file.name);
+                let info = match completed {
+                    Some(_) => None,
+                    None => Some(s.lib.wait_for_range(&s.file, s.pos, chunk_end).await?),
+                };
                 if s.handle.is_none() {
-                    let path = resolve_disk_path(&info, &s.file.name)
-                        .await
-                        .with_context(|| format!("File not found on disk yet: {}", s.file.name))?;
+                    let path = match (completed, &info) {
+                        (Some(path), _) => path,
+                        (None, Some(info)) => resolve_disk_path(info, &s.file.name)
+                            .await
+                            .with_context(|| format!("File not found on disk yet: {}", s.file.name))?,
+                        (None, None) => unreachable!("info is fetched when the file is not finished"),
+                    };
                     let mut f = tokio::fs::File::open(path).await?;
                     f.seek(SeekFrom::Start(s.pos)).await?;
                     s.handle = Some(f);
@@ -530,6 +665,31 @@ impl Library {
                 }
             }
         })
+    }
+}
+
+/// Status of a finished download, straight from its library.json entry.
+fn completed_status(mut entry: Value) -> Value {
+    if let Some(obj) = entry.as_object_mut() {
+        obj.extend([
+            ("ready".into(), json!(true)),
+            ("state".into(), json!("downloaded")),
+            ("progress".into(), json!(1)),
+            ("done".into(), json!(true)),
+            ("checking".into(), json!(false)),
+            ("held".into(), json!(false)),
+            ("peers".into(), json!(0)),
+            ("error".into(), Value::Null),
+        ]);
+    }
+    entry
+}
+
+/// The finished download's main video is still where it was saved (a cheap check, no reading).
+async fn completed_files_exist(entry: &Value) -> bool {
+    match entry["videos"][0]["disk"].as_str() {
+        Some(disk) => tokio::fs::metadata(disk).await.is_ok(),
+        None => false,
     }
 }
 

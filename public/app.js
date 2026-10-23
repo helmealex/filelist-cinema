@@ -685,7 +685,7 @@ function updateDetailsAction() {
     : dl.checking
       ? `qBittorrent is verifying the downloaded files… ${pct(dl.checkProgress)}`
       : dl.done
-      ? 'Downloaded · seeding while the app runs (good for your ratio)'
+      ? `Downloaded · ${bytes(dl.length)}`
       : dl.held
       ? `${pct(dl.progress)} downloaded · paused while a video is playing`
       : `${pct(dl.progress)} downloaded · ${bytes(dl.downloadSpeed)}/s · ${dl.peers} peers${dl.timeRemaining ? ` · ${eta(dl.timeRemaining)} left` : ''}`;
@@ -764,7 +764,7 @@ function renderDownloads() {
         : d.checking
           ? `Verifying downloaded files… ${pct(d.checkProgress)}`
           : d.done
-          ? `Done · ${bytes(d.length)} · seeding ↑ ${bytes(d.uploadSpeed)}/s · ratio ${(d.ratio || 0).toFixed(2)}`
+          ? `Downloaded · ${bytes(d.length)}`
           : d.held
           ? `${pct(d.progress)} of ${bytes(d.length)} · paused while a video is playing`
           : `${pct(d.progress)} of ${bytes(d.length)} · ↓ ${bytes(d.downloadSpeed)}/s · ${d.peers} peers${d.timeRemaining ? ` · ${eta(d.timeRemaining)}` : ''}`;
