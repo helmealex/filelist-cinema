@@ -8,7 +8,6 @@ use anyhow::{bail, Context, Result};
 use reqwest::multipart;
 use reqwest::StatusCode;
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
 
 use crate::util::TtlCache;
 
@@ -33,8 +32,6 @@ pub struct Qbit {
     http: reqwest::Client,
     last_launch: StdMutex<Option<Instant>>,
     cache: TtlCache<Value>,
-    throttle: Mutex<Option<Value>>, // Some(saved alt limits) while we own the throttle
-    throttle_cfg: StdMutex<(u64, u64, PathBuf)>,
 }
 
 impl Qbit {
@@ -46,8 +43,6 @@ impl Qbit {
             http: reqwest::Client::builder().timeout(Duration::from_secs(60)).build().expect("http client"),
             last_launch: StdMutex::new(None),
             cache: TtlCache::default(),
-            throttle: Mutex::new(None),
-            throttle_cfg: StdMutex::new((0, 0, PathBuf::new())),
         }
     }
 
@@ -239,56 +234,43 @@ impl Qbit {
         self.post("app/setPreferences", &[("json", &prefs.to_string())]).await
     }
 
-    // ---------- throttling while streaming ----------
+    // ---------- holding downloads while a video plays ----------
 
-    /// While a device streams, switch qBittorrent to alternative speed limits so downloads don't take the Wi-Fi
-    /// airtime and disk the stream needs. Limits in KiB/s. Restores the user's settings afterwards, also after a
-    /// crash (via the marker file).
-    pub async fn configure_throttle(&self, down_kib: u64, up_kib: u64, marker: PathBuf) {
-        *self.throttle_cfg.lock().unwrap() = (down_kib, up_kib, marker.clone());
-        if let Ok(text) = std::fs::read_to_string(&marker) {
-            if let Ok(saved) = serde_json::from_str::<Value>(&text) {
-                *self.throttle.lock().await = Some(saved);
-                self.set_throttle(false).await;
-            }
-        }
-    }
-
-    pub async fn set_throttle(&self, on: bool) {
-        let (down, up, marker) = self.throttle_cfg.lock().unwrap().clone();
-        if down == 0 {
-            return;
-        }
-        let mut owned = self.throttle.lock().await; // serializes on/off switches
-        if let Err(err) = self.apply_throttle(on, down, up, &marker, &mut owned).await {
-            eprintln!("[qbit] throttle: {err:#}");
-        }
-    }
-
-    async fn apply_throttle(&self, on: bool, down: u64, up: u64, marker: &PathBuf, owned: &mut Option<Value>) -> Result<()> {
-        let alt_mode = || async { Ok::<bool, anyhow::Error>(self.request("transfer/speedLimitsMode", &[], Body::None).await?.text().await?.trim() == "1") };
-        if on && owned.is_none() {
-            if alt_mode().await? {
-                return Ok(()); // the user already runs on alternative limits: leave them alone
-            }
-            let prefs = self.json("app/preferences", &[]).await?;
-            let saved = json!({ "alt_dl_limit": prefs["alt_dl_limit"], "alt_up_limit": prefs["alt_up_limit"] });
-            std::fs::write(marker, saved.to_string())?;
-            *owned = Some(saved);
-            // the Web API takes bytes/s
-            self.set_preferences(json!({ "alt_dl_limit": down * 1024, "alt_up_limit": up * 1024 })).await?;
-            self.post("transfer/toggleSpeedLimitsMode", &[]).await?;
-            println!("[qbit] streaming: downloads limited to {down} KiB/s down / {up} KiB/s up");
-        } else if !on {
-            if let Some(saved) = owned.take() {
-                if alt_mode().await? {
-                    self.post("transfer/toggleSpeedLimitsMode", &[]).await?;
-                }
-                self.set_preferences(saved).await?;
-                let _ = std::fs::remove_file(marker);
-                println!("[qbit] streaming stopped: download limits restored");
-            }
+    /// Stop torrents (qBittorrent 5 calls it "stop"; 4.x "pause").
+    pub async fn stop(&self, hashes: &[String]) -> Result<()> {
+        let hashes = hashes.join("|");
+        if self.post("torrents/stop", &[("hashes", &hashes)]).await.is_err() {
+            self.post("torrents/pause", &[("hashes", &hashes)]).await?;
         }
         Ok(())
+    }
+
+    pub async fn start(&self, hashes: &[String]) -> Result<()> {
+        let hashes = hashes.join("|");
+        if self.post("torrents/start", &[("hashes", &hashes)]).await.is_err() {
+            self.post("torrents/resume", &[("hashes", &hashes)]).await?;
+        }
+        Ok(())
+    }
+
+    /// Older versions switched qBittorrent to alternative speed limits while streaming and remembered the user's
+    /// own limits in this file. If one is left over (the app was closed mid-stream), put things back.
+    pub async fn undo_old_throttle(&self, marker: &std::path::Path) {
+        let Ok(text) = std::fs::read_to_string(marker) else { return };
+        let Ok(saved) = serde_json::from_str::<Value>(&text) else { return };
+        let restore = async {
+            let alt_mode = self.request("transfer/speedLimitsMode", &[], Body::None).await?.text().await?;
+            if alt_mode.trim() == "1" {
+                self.post("transfer/toggleSpeedLimitsMode", &[]).await?;
+            }
+            self.set_preferences(saved).await
+        };
+        match restore.await {
+            Ok(()) => {
+                let _ = std::fs::remove_file(marker);
+                println!("[qbit] removed the old streaming speed limits");
+            }
+            Err(err) => eprintln!("[qbit] could not remove the old streaming speed limits: {err:#}"),
+        }
     }
 }

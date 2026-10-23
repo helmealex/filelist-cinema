@@ -686,6 +686,8 @@ function updateDetailsAction() {
       ? `qBittorrent is verifying the downloaded files… ${pct(dl.checkProgress)}`
       : dl.done
       ? 'Downloaded · seeding while the app runs (good for your ratio)'
+      : dl.held
+      ? `${pct(dl.progress)} downloaded · paused while a video is playing`
       : `${pct(dl.progress)} downloaded · ${bytes(dl.downloadSpeed)}/s · ${dl.peers} peers${dl.timeRemaining ? ` · ${eta(dl.timeRemaining)} left` : ''}`;
 }
 
@@ -763,6 +765,8 @@ function renderDownloads() {
           ? `Verifying downloaded files… ${pct(d.checkProgress)}`
           : d.done
           ? `Done · ${bytes(d.length)} · seeding ↑ ${bytes(d.uploadSpeed)}/s · ratio ${(d.ratio || 0).toFixed(2)}`
+          : d.held
+          ? `${pct(d.progress)} of ${bytes(d.length)} · paused while a video is playing`
           : `${pct(d.progress)} of ${bytes(d.length)} · ↓ ${bytes(d.downloadSpeed)}/s · ${d.peers} peers${d.timeRemaining ? ` · ${eta(d.timeRemaining)}` : ''}`;
       return `
       <div class="dl-item" data-id="${esc(d.id)}">
@@ -845,6 +849,14 @@ function saveProgress(force = false) {
 
 // ---------- player ----------
 const video = $('#video');
+
+// Downloads stop while a video plays on any device: tell the server this one is still playing.
+function reportPlaying() {
+  if (!state.player || video.paused || video.ended) return;
+  fetch('/api/playing', { method: 'POST', keepalive: true }).catch(() => {});
+}
+setInterval(reportPlaying, 10000);
+video.addEventListener('playing', reportPlaying);
 
 function openPlayer(id) {
   const d = state.downloads.get(id);
@@ -983,7 +995,7 @@ async function connectionMbps() {
     /* no cache */
   }
   $('#playerNote').textContent = 'Measuring the connection speed…';
-  // The first request makes the server throttle qBittorrent; give the download a moment to back off
+  // The first request makes the server stop the downloads (playback is about to start); give them a moment
   // before measuring, or a busy Wi-Fi makes the link look much slower than it is during playback.
   await measureMbps(800);
   await new Promise((r) => setTimeout(r, 2500));

@@ -45,7 +45,9 @@ pub struct AppState {
     pub progress: StdMutex<Map<String, Value>>,
     pub progress_file: PathBuf,
     pub active_streams: Arc<AtomicUsize>,
-    pub stream_generation: AtomicU64,
+    /// When a device last showed it was playing a video (ms since the epoch; 0 = never)
+    pub last_playback: AtomicU64,
+    pub playback_changed: tokio::sync::Notify,
     pub build: String,
     pub media_log: PathBuf,
     pub seen_agents: StdMutex<HashSet<String>>,
@@ -62,6 +64,20 @@ pub struct AppState {
 impl AppState {
     pub fn filelist(&self) -> Option<Arc<FileList>> {
         self.filelist.read().unwrap().clone()
+    }
+
+    /// Mark a sign of playback. Returns true if nothing was playing until now.
+    pub fn touch_playback(&self) -> bool {
+        let was_playing = self.is_playing();
+        self.last_playback.store(util::now_ms(), Ordering::SeqCst);
+        !was_playing
+    }
+
+    /// A video is playing on some device: a stream is being sent, or a player reported in the last 30 s
+    /// (players report every 10 s; the margin covers pauses for seeking and switching episodes).
+    pub fn is_playing(&self) -> bool {
+        self.active_streams.load(Ordering::SeqCst) > 0
+            || util::now_ms().saturating_sub(self.last_playback.load(Ordering::SeqCst)) < 30_000
     }
 
     pub fn save_progress(&self) {
@@ -199,7 +215,8 @@ async fn main() {
         progress: StdMutex::new(progress),
         progress_file,
         active_streams,
-        stream_generation: AtomicU64::new(0),
+        last_playback: AtomicU64::new(0),
+        playback_changed: tokio::sync::Notify::new(),
         build: util::base36_now(),
         media_log: settings.data_dir.join("media.log"),
         seen_agents: StdMutex::new(HashSet::new()),
@@ -215,8 +232,7 @@ async fn main() {
     {
         let (qbit, lib, settings) = (qbit.clone(), lib.clone(), settings.clone());
         tokio::spawn(async move {
-            qbit.configure_throttle(settings.stream_limit_down_kib, settings.stream_limit_up_kib, settings.data_dir.join("throttle.json"))
-                .await;
+            qbit.undo_old_throttle(&settings.data_dir.join("throttle.json")).await;
             qbit.ensure_preferences().await;
             if let Err(err) = lib.restore().await {
                 eprintln!("[qbit] {err:#}");
@@ -226,6 +242,8 @@ async fn main() {
         tokio::spawn(async move { media.detect_encoder().await });
         let st = state.clone();
         tokio::spawn(async move { routes::refresh_downloads_forever(st).await });
+        let st = state.clone();
+        tokio::spawn(async move { routes::watch_playback_forever(st).await });
     }
 
     let addr: SocketAddr = format!("{}:{}", settings.host, settings.port)

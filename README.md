@@ -22,7 +22,7 @@ How the exe behaves:
   - **Original (converted):** used when the device can't decode the audio (TrueHD, DTS, AC3…). Only the audio is converted; the video is copied untouched, including HEVC/4K on devices that support it.
   - **Reduced quality:** 1080p 8 Mbit/s, 720p 4 or 2 Mbit/s, or 480p 1 Mbit/s, for slow Wi-Fi or devices that can't decode the video. It's served as **HLS**, so seeking is normal, and segments are produced just ahead of playback. It uses **Intel Quick Sync** on the GPU when available (HDR is tone-mapped to SDR), with libx264 on the CPU as the fallback.
 - **Resume:** the position is saved on the server, so you can stop on the PC and continue on the TV.
-- **While anyone is watching,** qBittorrent is throttled (`STREAM_LIMIT_DOWN_KIB` / `STREAM_LIMIT_UP_KIB`, default 1024/256 KiB/s) and background work pauses, because they compete for Wi-Fi airtime and the disk.
+- **While a video plays on any device,** unfinished downloads are stopped and background work pauses, so playback has the disk and the network to itself. The downloads start again about 30 seconds after the last video stops or is paused (downloads you stopped yourself in qBittorrent stay stopped).
 - **TV remote:**
   - Arrow keys move between cards and buttons; Back/Esc closes things.
   - In the player, ←/→ seek 10 s, OK pauses, and the media keys work.
@@ -62,7 +62,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1   # → FileListCinema.exe wi
 | Path | Contents |
 | --- | --- |
 | `src/main.rs` | Startup, shared state, single instance, browser launch |
-| `src/routes.rs` | HTTP API, media endpoints, viewer tracking (throttle, media log) |
+| `src/routes.rs` | HTTP API, media endpoints, viewer tracking (downloads stop during playback, media log) |
 | `src/filelist.rs` | FileList website login + scraping, or the passkey API; movie-only filter |
 | `src/qbit.rs` | qBittorrent Web API client, throttling, settings |
 | `src/library.rs`, `src/torrent.rs` | Downloads, progress from verified pieces, piece-aware streaming |

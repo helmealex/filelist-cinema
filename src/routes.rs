@@ -54,6 +54,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/downloads/{id}", post(add_download).delete(remove_download))
         .route("/api/progress", get(get_progress))
         .route("/api/progress/{id}", axum::routing::put(put_progress))
+        .route("/api/playing", axum::routing::post(playing))
         .route("/api/probe/{id}/{index}", get(probe))
         .route("/api/subs/{id}", get(list_subs).post(upload_sub).layer(DefaultBodyLimit::max(20 * 1024 * 1024)))
         .route("/api/subs/{id}/live", get(live_subs))
@@ -107,7 +108,32 @@ async fn common(State(st): S, req: Request, next: Next) -> Response {
     res
 }
 
-// ---------- viewers: throttle downloads, pause background work, media log ----------
+// ---------- viewers: hold downloads, pause background work, media log ----------
+
+/// Players report every 10 s while a video is actually playing (not paused); a browser buffering a direct file
+/// can go quiet for a while, so HTTP traffic alone doesn't tell.
+async fn playing(State(st): S) -> StatusCode {
+    if st.touch_playback() {
+        st.playback_changed.notify_one();
+    }
+    StatusCode::NO_CONTENT
+}
+
+/// Downloads stop while a video plays on any device, and start again once nothing has played for a while.
+pub async fn watch_playback_forever(st: Arc<AppState>) {
+    loop {
+        let hold = st.is_playing();
+        match st.lib.hold_downloads(hold).await {
+            Ok(true) => st.refresh_downloads.notify_one(),
+            Ok(false) => {}
+            Err(err) => eprintln!("[qbit] {}: {err:#}", if hold { "stopping downloads" } else { "resuming downloads" }),
+        }
+        tokio::select! {
+            _ = st.playback_changed.notified() => {}
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+        }
+    }
+}
 
 struct ViewerGuard {
     st: Arc<AppState>,
@@ -123,16 +149,9 @@ impl Drop for ViewerGuard {
             let how = if self.complete { "complete" } else { "closed early" };
             self.st.log_media(&format!("{line} -> {status} {how} after {}ms ({} bytes)", start.elapsed().as_millis(), self.bytes));
         }
-        if self.counted && self.st.active_streams.fetch_sub(1, Ordering::SeqCst) == 1 {
-            // last viewer gone: lift the download limits a little later (players reconnect while seeking)
-            let st = self.st.clone();
-            let generation = st.stream_generation.load(Ordering::SeqCst);
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(20)).await;
-                if st.active_streams.load(Ordering::SeqCst) == 0 && st.stream_generation.load(Ordering::SeqCst) == generation {
-                    st.qbit.set_throttle(false).await;
-                }
-            });
+        if self.counted {
+            self.st.active_streams.fetch_sub(1, Ordering::SeqCst);
+            self.st.touch_playback(); // the grace period starts when the last request ends
         }
     }
 }
@@ -169,10 +188,10 @@ async fn track_media(State(st): S, req: Request, next: Next) -> Response {
     let internal = ua.starts_with("Lavf/");
     if !internal {
         st.active_streams.fetch_add(1, Ordering::SeqCst);
-        st.stream_generation.fetch_add(1, Ordering::SeqCst);
         st.subs.pause_background(); // the disk is needed for playback now
-        let qbit = st.qbit.clone();
-        tokio::spawn(async move { qbit.set_throttle(true).await });
+        if st.touch_playback() {
+            st.playback_changed.notify_one(); // stop the downloads now, not on the next check
+        }
     }
     let mut log = None;
     if is_media {

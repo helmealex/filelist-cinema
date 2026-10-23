@@ -1,11 +1,11 @@
 //! The download library: torrents handed to qBittorrent, their status (from *verified* pieces), and
 //! piece-aware reading of files that may still be downloading.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -32,6 +32,9 @@ pub struct Library {
     layouts: RwLock<HashMap<String, Layout>>,
     entries: RwLock<Map<String, Value>>,
     pub checking_count: AtomicUsize,
+    /// Downloads this app stopped because a video is playing (hashes), saved so they restart even after a crash.
+    held: StdMutex<HashSet<String>>,
+    held_file: PathBuf,
 }
 
 /// A file inside a torrent, as needed for streaming.
@@ -56,6 +59,11 @@ impl Library {
         let _ = std::fs::create_dir_all(&torrent_dir);
         let _ = std::fs::create_dir_all(&download_dir);
         let library_file = data_dir.join("library.json");
+        let held_file = data_dir.join("held.json");
+        let held: HashSet<String> = std::fs::read_to_string(&held_file)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
         let entries: Map<String, Value> = std::fs::read_to_string(&library_file)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
@@ -76,6 +84,8 @@ impl Library {
             layouts: RwLock::new(layouts),
             entries: RwLock::new(entries),
             checking_count: AtomicUsize::new(0),
+            held: StdMutex::new(held),
+            held_file,
         }
     }
 
@@ -196,6 +206,59 @@ impl Library {
         Ok(())
     }
 
+    /// While a video plays, stop the library's unfinished downloads so playback has the disk and the network to
+    /// itself; afterwards start exactly those again (torrents the user stopped themselves stay stopped).
+    /// Returns whether anything changed.
+    pub async fn hold_downloads(&self, hold: bool) -> Result<bool> {
+        if !hold {
+            let held: Vec<String> = self.held.lock().unwrap().iter().cloned().collect();
+            if held.is_empty() {
+                return Ok(false);
+            }
+            self.qbit.start(&held).await?;
+            self.held.lock().unwrap().clear();
+            self.save_held();
+            println!("[qbit] no video playing: downloads resumed");
+            return Ok(true);
+        }
+        let hashes: Vec<String> = self.layouts.read().unwrap().values().map(|l| l.hash.clone()).collect();
+        let infos = self.qbit.infos(&hashes).await?;
+        let to_stop: Vec<String> = {
+            let held = self.held.lock().unwrap();
+            infos
+                .iter()
+                .filter(|i| {
+                    let state = i["state"].as_str().unwrap_or("");
+                    let stopped = state.starts_with("paused") || state.starts_with("stopped");
+                    i["progress"].as_f64().unwrap_or(0.0) < 1.0 && !stopped && !is_checking(state) && state != "error"
+                })
+                .filter_map(|i| i["hash"].as_str().map(String::from))
+                .filter(|h| !held.contains(h))
+                .collect()
+        };
+        if to_stop.is_empty() {
+            return Ok(false);
+        }
+        // remember first: if stopping half-works, they still get started again later
+        self.held.lock().unwrap().extend(to_stop.iter().cloned());
+        self.save_held();
+        self.qbit.stop(&to_stop).await?;
+        for h in &to_stop {
+            self.qbit.forget(h);
+        }
+        println!("[qbit] a video is playing: {} download(s) stopped until playback ends", to_stop.len());
+        Ok(true)
+    }
+
+    fn save_held(&self) {
+        let held: Vec<String> = self.held.lock().unwrap().iter().cloned().collect();
+        if held.is_empty() {
+            let _ = std::fs::remove_file(&self.held_file);
+        } else {
+            let _ = std::fs::write(&self.held_file, serde_json::to_string(&held).unwrap_or_default());
+        }
+    }
+
     pub async fn list(&self) -> Vec<Value> {
         let ids: Vec<(String, String)> = {
             let layouts = self.layouts.read().unwrap();
@@ -284,10 +347,13 @@ impl Library {
         let done = progress >= 1.0;
         let state = info["state"].as_str().unwrap_or("");
         let checking = is_checking(state);
+        let held = self.held.lock().unwrap().contains(hash);
         let peers = info["num_seeds"].as_u64().unwrap_or(0) + info["num_leechs"].as_u64().unwrap_or(0);
         let mut problem: Option<String> = None;
         if state.contains("error") || state == "missingFiles" {
             problem = Some(format!("qBittorrent: {state}"));
+        } else if held {
+            // stopped on purpose while a video plays: no peers or speed is expected
         } else if !done && !checking && info["progress"].as_f64().unwrap_or(0.0) >= 0.999 && info["dlspeed"].as_u64() == Some(0) {
             problem = Some(
                 "qBittorrent received all the data but has not written/verified it (its disk writer is stuck). Restart qBittorrent; if that does not help, use \"Force recheck\" on this torrent.".into(),
@@ -321,6 +387,7 @@ impl Library {
             ("progress".into(), json!(progress)),
             ("done".into(), json!(done)),
             ("checking".into(), json!(checking)),
+            ("held".into(), json!(held)),
             ("checkProgress".into(), if checking { info["progress"].clone() } else { Value::Null }),
             ("downloaded".into(), info["downloaded"].clone()),
             ("length".into(), info["size"].clone()),
