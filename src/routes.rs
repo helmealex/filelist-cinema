@@ -206,14 +206,11 @@ async fn track_media(State(st): S, req: Request, next: Next) -> Response {
         log = Some(line);
     }
     let start = Instant::now();
+    // Created before the request runs: if the viewer gives up while it's still being answered (e.g. the TV
+    // closes the player while a segment is converting), dropping the guard still un-counts the viewer.
+    let mut guard = ViewerGuard { st: st.clone(), counted: !internal, log: None, bytes: 0, complete: false };
     let res = next.run(req).await;
-    let guard = ViewerGuard {
-        st: st.clone(),
-        counted: !internal,
-        log: log.map(|l| (l, start, res.status().as_u16())),
-        bytes: 0,
-        complete: false,
-    };
+    guard.log = log.map(|l| (l, start, res.status().as_u16()));
     let (parts, body) = res.into_parts();
     let tracked = Tracked { inner: Box::pin(body.into_data_stream()), guard };
     Response::from_parts(parts, Body::from_stream(tracked))
