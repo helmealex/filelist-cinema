@@ -1,7 +1,7 @@
 //! FileList: website login + browse.php scraping, or the official API (username + passkey).
 
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use regex::Regex;
@@ -143,6 +143,42 @@ pub struct WebClient {
 struct Session {
     http: reqwest::Client,
     logged_in: bool,
+    /// After a refused login or FileList's hourly limit: don't contact the site again until then (every retry
+    /// counts against the limit and keeps the account locked).
+    blocked: Option<(Instant, String)>,
+}
+
+impl Session {
+    fn check_blocked(&mut self) -> Result<()> {
+        match &self.blocked {
+            Some((until, reason)) if Instant::now() < *until => {
+                let mins = until.saturating_duration_since(Instant::now()).as_secs().div_ceil(60);
+                bail!("{reason} (the app will try again in {mins} min)")
+            }
+            _ => {
+                self.blocked = None;
+                Ok(())
+            }
+        }
+    }
+
+    fn block(&mut self, wait: Duration, reason: String) -> anyhow::Error {
+        self.logged_in = false;
+        self.blocked = Some((Instant::now() + wait, reason.clone()));
+        anyhow!(reason)
+    }
+}
+
+const LIMIT_WAIT: Duration = Duration::from_secs(60 * 60);
+const LOGIN_RETRY_WAIT: Duration = Duration::from_secs(5 * 60);
+
+/// FileList's "Numarul maxim permis de actiuni pentru acest cont a fost depasit. Reveniti peste o ora."
+fn is_rate_limited(html: &str) -> bool {
+    html.to_lowercase().contains("maxim permis de actiuni")
+}
+
+fn rate_limit_error() -> String {
+    "FileList blocked this account for about an hour: it opened more pages than the site allows per hour".into()
 }
 
 impl WebClient {
@@ -150,7 +186,7 @@ impl WebClient {
         WebClient {
             username: username.to_string(),
             password: password.to_string(),
-            session: Mutex::new(Session { http: http_client(), logged_in: false }),
+            session: Mutex::new(Session { http: http_client(), logged_in: false, blocked: None }),
         }
     }
 
@@ -160,10 +196,14 @@ impl WebClient {
     }
 
     async fn login_locked(&self, session: &mut Session) -> Result<()> {
+        session.check_blocked()?;
         // fresh cookie jar for every login
         session.http = http_client();
         session.logged_in = false;
         let html = session.http.get(format!("{BASE}/login.php")).send().await?.text().await?;
+        if is_rate_limited(&html) {
+            return Err(session.block(LIMIT_WAIT, rate_limit_error()));
+        }
         let (action, mut fields) = parse_login_form(&html)
             .ok_or_else(|| anyhow!("Could not find the login form on filelist.io (site layout changed or blocked)."))?;
         set_field(&mut fields, "username", &self.username);
@@ -179,8 +219,11 @@ impl WebClient {
             .await?
             .text()
             .await?;
+        if is_rate_limited(&html) {
+            return Err(session.block(LIMIT_WAIT, rate_limit_error()));
+        }
         if !is_logged_in(&html) {
-            bail!("FileList login failed: {}", login_error(&html));
+            return Err(session.block(LOGIN_RETRY_WAIT, format!("FileList login failed: {}", login_error(&html))));
         }
         session.logged_in = true;
         Ok(())
@@ -189,19 +232,29 @@ impl WebClient {
     /// A logged-in HTTP client (logging in first if needed).
     async fn client(&self, force_login: bool) -> Result<reqwest::Client> {
         let mut session = self.session.lock().await;
+        session.check_blocked()?;
         if force_login || !session.logged_in {
             self.login_locked(&mut session).await?;
         }
         Ok(session.http.clone())
     }
 
+    /// A page from the site, or the hourly-limit error (which also stops further requests for a while).
+    async fn get_text(&self, http: reqwest::Client, url: Url) -> Result<String> {
+        let html = http.get(url).send().await?.text().await?;
+        if is_rate_limited(&html) {
+            return Err(self.session.lock().await.block(LIMIT_WAIT, rate_limit_error()));
+        }
+        Ok(html)
+    }
+
     async fn fetch_html(&self, url: Url) -> Result<String> {
-        let html = self.client(false).await?.get(url.clone()).send().await?.text().await?;
+        let html = self.get_text(self.client(false).await?, url.clone()).await?;
         if is_logged_in(&html) {
             return Ok(html);
         }
         // session expired: log in again once
-        Ok(self.client(true).await?.get(url).send().await?.text().await?)
+        self.get_text(self.client(true).await?, url).await
     }
 
     async fn browse(&self, page: u32, query: &str, cats: &[u32]) -> Result<Page> {
@@ -223,6 +276,9 @@ impl WebClient {
             let res = self.client(attempt > 0).await?.get(&url).send().await?;
             let is_html = res.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("text/html"));
             if is_html {
+                if is_rate_limited(&res.text().await.unwrap_or_default()) {
+                    return Err(self.session.lock().await.block(LIMIT_WAIT, rate_limit_error()));
+                }
                 continue; // logged out: log in again and retry
             }
             if !res.status().is_success() {
@@ -274,7 +330,7 @@ fn parse_login_form(html: &str) -> Option<(String, Vec<(String, String)>)> {
 
 fn login_error(html: &str) -> String {
     let doc = Html::parse_document(html);
-    doc.select(&sel(".error, .alert, .notice, .main .text, td.text"))
+    doc.select(&sel(".error, .alert, .notice, .cblock-innercontent, .main .text, td.text"))
         .next()
         .map(|e| text_of(e))
         .filter(|t| !t.is_empty())
@@ -486,5 +542,15 @@ mod tests {
         assert!(fields.contains(&("validator".into(), "abc".into())));
         assert!(fields.contains(&("unlock".into(), "1".into())));
         assert!(!fields.iter().any(|(k, _)| k == "other"));
+    }
+
+    #[test]
+    fn hourly_limit_page() {
+        let html = "<div class='cblock-header'><h4>Eroare</h4></div><div class='cblock-content'><div class='cblock-innercontent'>
+	Numarul maxim permis de actiuni pentru acest cont a fost depasit. Reveniti peste o ora.
+	</div></div>";
+        assert!(is_rate_limited(html));
+        assert!(login_error(html).starts_with("Numarul maxim permis"));
+        assert!(!is_rate_limited(ROW));
     }
 }

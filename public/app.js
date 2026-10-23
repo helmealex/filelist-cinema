@@ -415,7 +415,7 @@ function updateHeroAction() {
   if (dl?.checking) {
     btn.innerHTML = `${ICON_DOWN} Verifying files…`;
     btn.onclick = () => openDetails(item.m.id);
-  } else if (dl?.videos?.length) {
+  } else if (dl?.done && dl.videos?.length) {
     const pr = resumePoint(item.m.id);
     btn.innerHTML = `${ICON_PLAY} ${pr ? 'Resume' : 'Play'}`;
     btn.onclick = () => openPlayer(item.m.id);
@@ -475,7 +475,7 @@ async function loadMovies(reset = false) {
     // FileList's search also matches games, apps, music…, which the server drops. Don't page through
     // endless non-movie results: give up after a few pages in a row without a single movie.
     s.emptyPages = data.items.length ? 0 : (s.emptyPages || 0) + 1;
-    s.hasMore = data.hasMore && s.emptyPages < 5;
+    s.hasMore = data.hasMore && s.emptyPages < 3;
     s.page += 1;
     const count = $('#grid').children.length;
     $('#status').textContent = count
@@ -520,12 +520,14 @@ $('#searchForm').addEventListener('submit', (e) => {
   clearTimeout(searchTimer);
   runSearch($('#searchInput').value.trim());
 });
+// Every search costs FileList page views (the account has an hourly limit): search as you type only once the
+// typing pauses and the text is long enough. Enter searches right away.
 $('#searchInput').addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     const q = $('#searchInput').value.trim();
-    if (q !== state.search.query) runSearch(q);
-  }, 600);
+    if (q !== state.search.query && (q.length >= 3 || !q)) runSearch(q);
+  }, 1200);
 });
 $('#categorySelect').addEventListener('change', (e) => {
   state.search.cats = e.target.value;
@@ -649,13 +651,14 @@ function updateDetailsAction() {
   }
   bar.classList.toggle('done', dl.done);
   bar.firstElementChild.style.width = pct(dl.progress);
-  const canPlay = dl.videos?.length > 0 && !dl.checking;
+  const canPlay = dl.done && dl.videos?.length > 0 && !dl.checking;
   const pr = resumePoint(id);
   if (dl.checking) btn.textContent = 'Verifying files…';
   else if (canPlay && pr) btn.innerHTML = `${ICON_PLAY} Resume from ${clock(pr.t)}`;
-  else if (dl.done) btn.innerHTML = `${ICON_PLAY} Play`;
-  else if (canPlay) btn.innerHTML = `${ICON_PLAY} Play now`;
-  else btn.textContent = dl.ready ? 'No video file in torrent' : 'Connecting…';
+  else if (canPlay) btn.innerHTML = `${ICON_PLAY} Play`;
+  else if (!dl.ready) btn.textContent = 'Connecting…';
+  else if (!dl.videos?.length) btn.textContent = 'No video file in torrent';
+  else btn.innerHTML = `${ICON_DOWN} Downloading ${pct(dl.progress)}`;
   btn.disabled = !canPlay;
   btn.onclick = () => {
     $('#detailsDialog').close();
@@ -757,7 +760,7 @@ function renderDownloads() {
           <div class="progress ${d.done ? 'done' : ''}"><div style="width:${pct(d.progress)}"></div></div>
           <div class="dl-stats">${stats}</div>
           <div class="dl-actions">
-            <button class="btn btn-light small" data-act="play" ${d.videos?.length && !d.checking ? '' : 'disabled'}>${ICON_PLAY} ${resumePoint(d.id) ? 'Resume' : 'Play'}</button>
+            <button class="btn btn-light small" data-act="play" ${d.done && d.videos?.length && !d.checking ? '' : 'disabled'}>${ICON_PLAY} ${resumePoint(d.id) ? 'Resume' : 'Play'}</button>
             <button class="btn btn-glass small" data-act="remove">Remove</button>
             <button class="btn btn-glass small danger" data-act="delete">Delete files</button>
           </div>
@@ -835,6 +838,7 @@ function openPlayer(id) {
   const d = state.downloads.get(id);
   if (!d?.videos?.length) return;
   if (d.checking) return toast('qBittorrent is still verifying this movie. It can be played once that finishes.');
+  if (!d.done) return toast('This movie can be played once the download finishes.');
   const pr = resumePoint(id);
   const index = d.videos.some((v) => v.index === pr?.index) ? pr.index : d.videos[0].index;
   state.player = {
@@ -1053,14 +1057,7 @@ $('#qualitySelect').addEventListener('change', async (e) => {
 function loadVideo() {
   const p = state.player;
   $('#playerNote').classList.remove('error');
-  $('#playerNote').textContent = [
-    p.autoNote,
-    state.downloads.get(p.id)?.done
-      ? ''
-      : 'Streaming while downloading: playback may pause until enough data arrives, and seeking ahead of the download waits for it.',
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  $('#playerNote').textContent = p.autoNote || '';
   $('#seekBar').classList.toggle('hidden', !p.compat);
   destroyHls();
   if (p.mode === 'hls') {

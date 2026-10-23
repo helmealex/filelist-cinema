@@ -100,14 +100,14 @@ impl Library {
         self.layouts.read().unwrap().get(id).cloned()
     }
 
-    /// Re-add library torrents that qBittorrent no longer knows about; make sure streaming flags are set.
+    /// Re-add library torrents that qBittorrent no longer knows about; make sure the download order is right.
     pub async fn restore(&self) -> Result<()> {
         let layouts: Vec<(String, Layout)> = self.layouts.read().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let hashes: Vec<String> = layouts.iter().map(|(_, l)| l.hash.clone()).collect();
         let infos = self.qbit.infos(&hashes).await?;
         for (id, layout) in layouts {
             match infos.iter().find(|i| i["hash"] == layout.hash.as_str()) {
-                Some(info) => self.ensure_streaming_flags(info).await?,
+                Some(info) => self.ensure_download_order(info).await?,
                 None => {
                     let bytes = std::fs::read(self.torrent_path(&id))?;
                     self.send(&id, &bytes).await?;
@@ -138,8 +138,8 @@ impl Library {
         let fields = vec![
             ("savepath".to_string(), self.download_dir.to_string_lossy().into_owned()),
             ("tags".to_string(), TAG.to_string()),
-            ("sequentialDownload".to_string(), "true".to_string()),
-            ("firstLastPiecePrio".to_string(), "true".to_string()),
+            ("sequentialDownload".to_string(), "false".to_string()),
+            ("firstLastPiecePrio".to_string(), "false".to_string()),
         ];
         self.qbit.add_torrent(bytes, &format!("{id}.torrent"), fields).await?;
         // qBittorrent answers "Fails." for duplicates, so confirm by hash instead of trusting the response text
@@ -152,8 +152,8 @@ impl Library {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
         let info = info.ok_or_else(|| anyhow!("qBittorrent did not accept the torrent"))?;
-        self.ensure_streaming_flags(&info).await?;
-        // subtitles are tiny: fetch them first so they work while the movie is still downloading
+        self.ensure_download_order(&info).await?;
+        // subtitles are tiny: fetch them first
         self.qbit.forget(&hash);
         let subs: Vec<String> = self
             .qbit
@@ -169,14 +169,14 @@ impl Library {
         Ok(())
     }
 
-    /// Sequential download + first/last pieces first (MKV/MP4 keep their index at the end).
-    /// The add flags aren't always honoured, so check and toggle.
-    async fn ensure_streaming_flags(&self, info: &Value) -> Result<()> {
+    /// Movies play only once fully downloaded, so qBittorrent fetches rarest pieces first (faster, kinder to the
+    /// swarm) rather than in order. The add flags aren't always honoured, and older torrents were added sequential.
+    async fn ensure_download_order(&self, info: &Value) -> Result<()> {
         let hash = info["hash"].as_str().unwrap_or_default();
-        if info["seq_dl"] == json!(false) {
+        if info["seq_dl"] == json!(true) {
             self.qbit.post("torrents/toggleSequentialDownload", &[("hashes", hash)]).await?;
         }
-        if info["f_l_piece_prio"] == json!(false) {
+        if info["f_l_piece_prio"] == json!(true) {
             self.qbit.post("torrents/toggleFirstLastPiecePrio", &[("hashes", hash)]).await?;
         }
         Ok(())

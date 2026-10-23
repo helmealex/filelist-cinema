@@ -1,6 +1,6 @@
 # FileList Cinema
 
-Browse the movies on [filelist.io](https://filelist.io) in a Netflix-style interface, download them with qBittorrent, and watch them in any browser on your network (PC, phone, TV), even while they're still downloading.
+Browse the movies on [filelist.io](https://filelist.io) in a Netflix-style interface, download them with qBittorrent, and watch them in any browser on your network (PC, phone, TV) once they've finished downloading.
 
 The app is a single native Windows executable, `FileListCinema.exe` (~7 MB). The server is written in Rust, and the web UI is built into the exe.
 

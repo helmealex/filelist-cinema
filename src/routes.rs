@@ -303,20 +303,23 @@ fn require_filelist(st: &AppState) -> ApiResult<Arc<FileList>> {
 
 // ---------- browsing ----------
 
-/// #7: listings are cached for 5 minutes (faster home page, and kinder to the tracker).
+/// Listings are cached for 15 minutes: FileList allows an account only so many pages per hour. When the site
+/// refuses, an older copy is better than an error.
 async fn movies(State(st): S, Query(q): Q) -> ApiResult<Json<Value>> {
     let filelist = require_filelist(&st)?;
     let page: u32 = q.get("page").and_then(|p| p.parse().ok()).unwrap_or(0);
     let query = q.get("q").map(|s| s.trim().to_string()).unwrap_or_default();
     let cats: Vec<u32> = q.get("cats").map(|c| c.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
     let key = format!("{page}|{query}|{cats:?}");
-    let mut result = match st.listings.get(&key, Duration::from_secs(300)) {
+    let mut result = match st.listings.get(&key, Duration::from_secs(15 * 60)) {
         Some(hit) => hit,
-        None => {
-            let fresh = filelist.browse(page, &query, &cats).await?;
-            st.listings.put(key, fresh.clone());
-            fresh
-        }
+        None => match filelist.browse(page, &query, &cats).await {
+            Ok(fresh) => {
+                st.listings.put(key, fresh.clone());
+                fresh
+            }
+            Err(err) => st.listings.get(&key, Duration::from_secs(24 * 3600)).ok_or(err)?,
+        },
     };
     for item in &mut result.items {
         item.downloaded = st.lib.has(&item.id);
@@ -451,10 +454,12 @@ async fn put_progress(State(st): S, Path(id): Path<String>, Json(b): Json<Value>
 
 // ---------- media ----------
 
-/// Direct playback with HTTP range support. Works while downloading: reads wait until qBittorrent has the needed
-/// pieces verified (it downloads sequentially, so seeking far ahead waits longer).
+/// Direct playback with HTTP range support, for completely downloaded files only.
 async fn stream(State(st): S, Path((id, index)): Path<(String, u64)>, method: Method, headers: HeaderMap) -> ApiResult<Response> {
     let file = st.lib.file(&id, index).await.ok_or_else(|| ApiError::not_found("Not found"))?;
+    if st.lib.local_path(&id, index).await.is_none() {
+        return Err(still_downloading());
+    }
     let total = file.size;
     let content_type = match file_ext(&file.name).as_str() {
         ".mp4" | ".m4v" | ".mov" => "video/mp4",
@@ -552,15 +557,17 @@ async fn live_subs(State(st): S, Path(id): Path<String>, Query(q): Q) -> ApiResu
     })))
 }
 
-/// The file on disk when it's complete (fast), otherwise via /stream (which waits for pieces).
+fn still_downloading() -> ApiError {
+    ApiError::new(StatusCode::CONFLICT, "This movie can be played once the download finishes.")
+}
+
+/// The file on disk; movies play only once completely downloaded.
 async fn media_input(st: &AppState, id: &str, index: u64) -> ApiResult<String> {
     if st.lib.file(id, index).await.is_none() {
         return Err(ApiError::not_found("Not found"));
     }
-    Ok(match st.lib.local_path(id, index).await {
-        Some(p) => p.to_string_lossy().into_owned(),
-        None => format!("http://127.0.0.1:{}/stream/{id}/{index}", st.settings.read().unwrap().port),
-    })
+    let path = st.lib.local_path(id, index).await.ok_or_else(still_downloading)?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 async fn probe(State(st): S, Path((id, index)): Path<(String, u64)>) -> ApiResult<Json<Value>> {
