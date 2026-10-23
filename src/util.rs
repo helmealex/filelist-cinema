@@ -64,7 +64,17 @@ pub fn parse_release_name(name: &str) -> (String, Option<String>) {
     static NO_YEAR: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)\s(?:\d{3,4}p|UHD|BluRay|BDRip|BRRip|WEB|WEBRip|HDTV|DVDRip|DVD|x264|x265|HEVC|H 26[45])\b").unwrap()
     });
+    // TV releases: "Show.S02E05…", "Show.S01.Complete…", "Show.Season.1…" (a year before the marker still counts)
+    static EPISODE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)\s(?:S\d{1,2}(?:\s?E\d{1,3})?|Season\s\d+|Complete\sSeries)\b").unwrap());
     let clean = SPACES.replace_all(name, " ").trim().to_string();
+    if let Some(m) = EPISODE.find(&clean) {
+        let head = clean[..m.start()].trim();
+        return match WITH_YEAR.captures(&format!("{head} ")) {
+            Some(c) => (c[1].trim().to_string(), Some(c[2].to_string())),
+            None => (head.to_string(), None),
+        };
+    }
     if let Some(c) = WITH_YEAR.captures(&clean) {
         return (c[1].trim().to_string(), Some(c[2].to_string()));
     }
@@ -151,6 +161,9 @@ mod tests {
         assert_eq!(parse_release_name("The.Matrix.1999.1080p.BluRay.x264-GRP"), ("The Matrix".into(), Some("1999".into())));
         assert_eq!(parse_release_name("Blade Runner 2049 2017 2160p"), ("Blade Runner".into(), Some("2049".into())));
         assert_eq!(parse_release_name("Some.Show.1080p.WEB"), ("Some Show".into(), None));
+        assert_eq!(parse_release_name("The.Bear.S03E02.1080p.WEB.h264-ETHEL"), ("The Bear".into(), None));
+        assert_eq!(parse_release_name("Shogun.2024.S01.2160p.DSNP.WEB-DL"), ("Shogun".into(), Some("2024".into())));
+        assert_eq!(parse_release_name("Frieren.Season.1.1080p.BluRay"), ("Frieren".into(), None));
     }
 
     #[test]

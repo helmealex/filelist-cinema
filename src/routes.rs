@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use futures_util::{Stream, StreamExt};
 use serde_json::{json, Value};
 
-use crate::filelist::{FileList, MOVIE_CATEGORIES};
+use crate::filelist::{FileList, VIDEO_CATEGORIES};
 use crate::livesubs::{parse_mkv_header, LiveCues, MkvInfo, MkvTap};
 use crate::media::{preset, Caps, PRESETS};
 use crate::opensubs::OpenSubs;
@@ -208,7 +208,7 @@ async fn config(State(st): S) -> Json<Value> {
     Json(json!({
         "setup": filelist.is_none(),
         "mode": filelist.map(|f| f.mode()),
-        "categories": MOVIE_CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
+        "categories": VIDEO_CATEGORIES.iter().map(|(id, name)| json!({ "id": id, "name": name })).collect::<Vec<_>>(),
         "ffmpeg": st.media.ffmpeg.is_some(),
         "encoder": st.media.encoder_name(),
         "quality": PRESETS.iter().map(|(k, p)| (k.to_string(), json!(p))).collect::<serde_json::Map<_, _>>(),

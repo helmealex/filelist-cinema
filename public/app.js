@@ -35,6 +35,12 @@ const store = {
 
 function parseReleaseName(name) {
   const clean = String(name).replace(/[._]/g, ' ').replace(/\s+/g, ' ').trim();
+  // TV releases: "Show S02E05 …", "Show 2024 S01 …", "Show Season 1 …"
+  const ep = clean.match(/^(.+?)\s(?:S\d{1,2}(?:\s?E\d{1,3})?|Season\s\d+|Complete\sSeries)\b/i);
+  if (ep) {
+    const y = ep[1].match(/^(.+?)\s+[([]?((?:19|20)\d{2})[)\]]?$/);
+    return y ? { title: y[1].trim(), year: y[2] } : { title: ep[1].trim(), year: null };
+  }
   const m = clean.match(/^(.+?)\s+[([]?((?:19|20)\d{2})[)\]]?(?:\s|$)/);
   if (m) return { title: m[1].trim(), year: m[2] };
   return { title: clean.split(/\s(?:\d{3,4}p|BluRay|WEB|HDTV|DVDRip|x26[45]|HEVC)\b/i)[0], year: null };
@@ -245,6 +251,12 @@ const ROWS = [
   { key: 'uhd', title: '4K Ultra HD', cats: '6,26' },
   { key: 'bluray', title: 'Blu-ray', cats: '20' },
   { key: 'sd', title: 'SD & DVD', cats: '1,2,3' },
+  { key: 'series', title: 'TV series', cats: '21,27' },
+  { key: 'kdrama', title: 'K-Drama', cats: '31' },
+  { key: 'anime', title: 'Anime', cats: '24' },
+  { key: 'cartoons', title: 'Cartoons', cats: '15' },
+  { key: 'docs', title: 'Documentaries', cats: '16' },
+  { key: 'rodub', title: 'Dubbed in Romanian', cats: '28' },
 ];
 const rowState = new Map(); // key -> { def, el, track, page, hasMore, loading, ids }
 
@@ -463,7 +475,7 @@ async function loadMovies(reset = false) {
   const gen = generation;
   s.loading = true;
   $('#sentinel').textContent = reset ? '' : 'Loading…';
-  $('#searchTitle').innerHTML = s.query ? `Results for <b>“${esc(s.query)}”</b>` : 'All movies';
+  $('#searchTitle').innerHTML = s.query ? `Results for <b>“${esc(s.query)}”</b>` : 'All videos';
   try {
     const data = await api(`/api/movies?${new URLSearchParams({ page: s.page, q: s.query, cats: s.cats })}`);
     if (gen !== generation) return; // a newer search replaced this one
@@ -482,7 +494,7 @@ async function loadMovies(reset = false) {
       ? `${count} titles`
       : s.hasMore
         ? 'Searching…'
-        : 'No movies found. Try another title or an IMDb id.';
+        : 'Nothing found. Try another title or an IMDb id.';
     $('#status').classList.remove('error');
   } catch (err) {
     if (gen !== generation) return;

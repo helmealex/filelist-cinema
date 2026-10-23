@@ -17,17 +17,27 @@ use crate::util::{decode_html_entities, format_bytes};
 const BASE: &str = "https://filelist.io";
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36";
 
-/// FileList movie categories (id, label as shown on the tracker).
-pub const MOVIE_CATEGORIES: &[(u32, &str)] = &[
-    (4, "Filme HD"),
-    (19, "Filme HD-RO"),
-    (6, "Filme 4K"),
-    (26, "Filme 4K Blu-Ray"),
-    (20, "Filme Blu-Ray"),
-    (1, "Filme SD"),
-    (2, "Filme DVD"),
-    (3, "Filme DVD-RO"),
-    (25, "Filme 3D"),
+/// FileList video categories (id, label as shown on the tracker). Left out: XXX, music, games, apps, books…
+pub const VIDEO_CATEGORIES: &[(u32, &str)] = &[
+    (4, "Movies HD"),
+    (19, "Movies HD-RO"),
+    (6, "Movies 4K"),
+    (26, "Movies 4K Blu-Ray"),
+    (20, "Movies Blu-Ray"),
+    (1, "Movies SD"),
+    (2, "Movies DVD"),
+    (3, "Movies DVD-RO"),
+    (25, "Movies 3D"),
+    (28, "RO Dubbed"),
+    (21, "TV-Series HD"),
+    (27, "TV-Series 4K"),
+    (23, "TV-Series SD"),
+    (31, "K-Drama"),
+    (24, "Anime"),
+    (15, "Cartoons"),
+    (16, "Docs"),
+    (13, "Sport"),
+    (12, "Videoclips"),
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -56,8 +66,8 @@ pub struct Page {
 }
 
 fn normalize_cats(cats: &[u32]) -> Vec<u32> {
-    let valid: Vec<u32> = cats.iter().copied().filter(|c| MOVIE_CATEGORIES.iter().any(|(id, _)| id == c)).collect();
-    if valid.is_empty() { MOVIE_CATEGORIES.iter().map(|(id, _)| *id).collect() } else { valid }
+    let valid: Vec<u32> = cats.iter().copied().filter(|c| VIDEO_CATEGORIES.iter().any(|(id, _)| id == c)).collect();
+    if valid.is_empty() { VIDEO_CATEGORIES.iter().map(|(id, _)| *id).collect() } else { valid }
 }
 
 // FileList ignores the category filter when searching (games, apps, music… come back too), so filter ourselves.
@@ -66,7 +76,10 @@ static MOVIE_CATEGORY_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)
 fn is_wanted(m: &Movie, cats: &[u32]) -> bool {
     match m.category_id {
         Some(id) => cats.contains(&id),
-        None => MOVIE_CATEGORY_NAME.is_match(&m.category),
+        None => {
+            MOVIE_CATEGORY_NAME.is_match(&m.category)
+                || VIDEO_CATEGORIES.iter().any(|(id, name)| cats.contains(id) && name.eq_ignore_ascii_case(m.category.trim()))
+        }
     }
 }
 
@@ -512,7 +525,7 @@ mod tests {
  <div class='torrenttable'><b>456</b></div>
  <div class='torrenttable'>12</div>
 </div>
-<div class='torrentrow'><div class='torrenttable'><a href='browse.php?cat=27'><img alt='Games PC'></a></div><div class='torrenttable'><a href='details.php?id=9' title='FIFA'>x</a></div></div>
+<div class='torrentrow'><div class='torrenttable'><a href='browse.php?cat=9'><img alt='Games PC'></a></div><div class='torrenttable'><a href='details.php?id=9' title='FIFA'>x</a></div></div>
 <a href='browse.php?page=1'>Next</a>"#;
 
     #[test]

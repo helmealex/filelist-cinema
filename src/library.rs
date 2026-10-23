@@ -305,7 +305,13 @@ impl Library {
             })
             .cloned()
             .collect();
-        videos.sort_by_key(|v| std::cmp::Reverse(v["length"].as_u64().unwrap_or(0)));
+        if videos.len() >= 3 {
+            // a season pack: episodes in order
+            videos.sort_by_key(|v| v["path"].as_str().unwrap_or("").to_lowercase());
+        } else {
+            // a movie (+ maybe an extra): the feature first
+            videos.sort_by_key(|v| std::cmp::Reverse(v["length"].as_u64().unwrap_or(0)));
+        }
         let subtitles: Vec<Value> =
             files.iter().filter(|f| SUB_EXT.contains(&f["ext"].as_str().unwrap_or(""))).cloned().collect();
         obj.extend([
