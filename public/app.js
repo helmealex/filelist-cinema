@@ -905,7 +905,7 @@ $('#startOver').addEventListener('click', () => {
   applyQuality(p.quality, 0);
   video.focus();
 });
-$('#settingsToggle').addEventListener('click', () => $('#settingsPanel').classList.toggle('hidden'));
+$('#settingsToggle').addEventListener('click', () => setPlayerSettings($('#settingsPanel').classList.contains('hidden')));
 
 let osdTimer;
 function showOsd(text) {
@@ -1585,6 +1585,46 @@ function goBack() {
   return false;
 }
 
+// Player remote, like Netflix: ←/→ always seek and OK always plays/pauses, whatever has the focus (handled in the
+// capture phase, before any focused button, select or the video's own controls see the key). ↑/↓ open the playback
+// settings (episode, quality, subtitles); while they're open the remote moves between them and Back closes them.
+function setPlayerSettings(open) {
+  const panel = $('#settingsPanel');
+  panel.classList.toggle('hidden', !open);
+  if (open) panel.querySelector('select:not([disabled]), button:not([disabled])')?.focus();
+  else video.focus({ preventScroll: true });
+}
+
+function playerRemote(e) {
+  if (!state.player || !playerDialog.open) return null;
+  if (e.target.matches?.('input[type="search"], input[type="text"], textarea')) return null;
+  const settingsOpen = !$('#settingsPanel').classList.contains('hidden');
+  if (settingsOpen) {
+    const back = e.keyCode === 461 || BACK_KEYS.has(e.key);
+    return back ? () => setPlayerSettings(false) : null; // otherwise: normal navigation inside the settings
+  }
+  if (e.key === 'ArrowRight') return () => seekBy(10);
+  if (e.key === 'ArrowLeft') return () => seekBy(-10);
+  if (e.key === 'Enter' || e.key === ' ') return e.type === 'keydown' && !e.repeat ? togglePlay : () => {};
+  if (e.key === 'ArrowUp' || e.key === 'ArrowDown') return () => setPlayerSettings(true);
+  return null;
+}
+
+for (const type of ['keydown', 'keyup']) {
+  window.addEventListener(
+    type,
+    (e) => {
+      const action = playerRemote(e);
+      if (!action) return;
+      // keyup too: a focused button would otherwise "click" when Space/OK is released
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (type === 'keydown') action();
+    },
+    true,
+  );
+}
+
 document.addEventListener('keydown', (e) => {
   const target = e.target;
   const typing = target.matches?.('input[type="search"], input[type="text"], textarea');
@@ -1602,9 +1642,8 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Player shortcuts (when focus is on the video, not on a control)
+  // Player shortcuts (arrows and OK: see playerRemote)
   if (state.player && !typing && !onSelect) {
-    const onVideo = target === video || target === document.body || target === playerDialog;
     if (e.key === 'g' || e.key === 'G') return changeSubDelay(-0.1);
     if (e.key === 'h' || e.key === 'H') return changeSubDelay(0.1);
     if (['MediaPlayPause', 'MediaPlay', 'MediaPause'].includes(e.key) || [415, 19].includes(e.keyCode)) {
@@ -1613,11 +1652,6 @@ document.addEventListener('keydown', (e) => {
     }
     if (e.key === 'MediaFastForward' || e.keyCode === 417) return seekBy(30);
     if (e.key === 'MediaRewind' || e.keyCode === 412) return seekBy(-30);
-    if (onVideo) {
-      if (e.key === 'ArrowRight') return e.preventDefault(), seekBy(10);
-      if (e.key === 'ArrowLeft') return e.preventDefault(), seekBy(-10);
-      if (e.key === 'Enter' || e.key === ' ') return e.preventDefault(), togglePlay();
-    }
   }
 
   const dir = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' }[e.key];

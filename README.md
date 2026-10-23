@@ -25,7 +25,7 @@ How the exe behaves:
 - **While a video plays on any device,** unfinished downloads are stopped and background work pauses, so playback has the disk and the network to itself. The downloads start again about 30 seconds after the last video stops or is paused (downloads you stopped yourself in qBittorrent stay stopped).
 - **TV remote:**
   - Arrow keys move between cards and buttons; Back/Esc closes things.
-  - In the player, ←/→ seek 10 s, OK pauses, and the media keys work.
+  - In the player, like Netflix: ←/→ seek 10 s and OK pauses/resumes, whatever is selected. ↑/↓ open the playback settings (episode, quality, subtitles), and Back closes them. The media keys work too.
   - G/H adjust subtitle sync.
 - **Other devices:** set `HOST=0.0.0.0` and open the "on your network" address printed at startup. The app has no password, so only do this on a network you trust.
 
