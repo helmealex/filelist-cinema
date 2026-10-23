@@ -160,7 +160,7 @@ impl Qbit {
             *last = Some(Instant::now());
         }
         println!("[qbit] not reachable, starting {}", exe.display());
-        let _ = std::process::Command::new(&exe).spawn();
+        let _ = crate::config::spawn_detached(&exe);
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if self.http.get(format!("{}/api/v2/app/version", self.base())).send().await.is_ok() {

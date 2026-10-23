@@ -121,8 +121,9 @@ impl Subtitles {
         format!("{}/stream/{id}/{video}", self.stream_base)
     }
 
-    pub async fn list(&self, id: &str, video_index: Option<u64>) -> Vec<Value> {
-        let Some(status) = self.lib.list().await.into_iter().find(|d| d["id"] == id) else { return vec![] };
+    /// Available subtitle tracks for a download (`status` as in the downloads list).
+    pub async fn list(&self, id: &str, status: &Value, video_index: Option<u64>) -> Vec<Value> {
+        let status = status.clone();
         let mut tracks = Vec::new();
 
         let mut saved_online: HashSet<u64> = HashSet::new();

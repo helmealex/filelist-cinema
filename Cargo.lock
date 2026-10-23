@@ -346,6 +346,7 @@ dependencies = [
  "sha1",
  "tokio",
  "tokio-util",
+ "windows-sys",
 ]
 
 [[package]]

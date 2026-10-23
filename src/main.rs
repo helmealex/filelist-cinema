@@ -51,6 +51,10 @@ pub struct AppState {
     pub seen_agents: StdMutex<HashSet<String>>,
     pub noise: bytes::Bytes,
     pub live: Arc<livesubs::LiveCues>,
+    /// Latest downloads status, refreshed in the background (qBittorrent can take seconds per answer when the
+    /// disk is busy; the page should never wait for it).
+    pub downloads: RwLock<Option<Vec<Value>>>,
+    pub refresh_downloads: tokio::sync::Notify,
     /// Matroska header info per "id:index" (subtitle tracks), for picking subtitles out of streamed bytes
     pub mkv: tokio::sync::Mutex<std::collections::HashMap<String, Option<Arc<livesubs::MkvInfo>>>>,
 }
@@ -129,6 +133,7 @@ async fn main() {
         }));
     }
     let _ = std::process::Command::new("cmd").args(["/c", "title FileList Cinema"]).status();
+    config::kill_children_on_exit();
 
     let settings = Settings::load();
     let _ = std::fs::create_dir_all(&settings.data_dir);
@@ -201,6 +206,8 @@ async fn main() {
         noise: noise(1 << 20),
         live,
         mkv: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        downloads: RwLock::new(None),
+        refresh_downloads: tokio::sync::Notify::new(),
         settings: RwLock::new(settings.clone()),
     });
 
@@ -217,6 +224,8 @@ async fn main() {
         });
         let media = media.clone();
         tokio::spawn(async move { media.detect_encoder().await });
+        let st = state.clone();
+        tokio::spawn(async move { routes::refresh_downloads_forever(st).await });
     }
 
     let addr: SocketAddr = format!("{}:{}", settings.host, settings.port)

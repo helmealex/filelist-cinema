@@ -663,7 +663,9 @@ function updateDetailsAction() {
   };
   const note = $('#detailsNote');
   note.classList.toggle('error', Boolean(dl.error));
-  note.textContent = dl.error
+  note.textContent = dl.connecting
+    ? 'Connecting to qBittorrent…'
+    : dl.error
     ? dl.error
     : dl.checking
       ? `qBittorrent is verifying the downloaded files… ${pct(dl.checkProgress)}`
@@ -738,7 +740,9 @@ function renderDownloads() {
   const focusedId = focused && document.activeElement.closest('.dl-item').dataset.id;
   box.innerHTML = [...state.downloads.values()]
     .map((d) => {
-      const stats = d.error
+      const stats = d.connecting
+        ? 'Connecting to qBittorrent…'
+        : d.error
         ? `<span class="err">${esc(d.error)}</span>`
         : d.checking
           ? `Verifying downloaded files… ${pct(d.checkProgress)}`

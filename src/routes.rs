@@ -350,19 +350,37 @@ async fn meta(State(st): S, Query(q): Q) -> Response {
 
 // ---------- downloads ----------
 
+/// Instant: the latest snapshot from the background refresher (or the library as known from disk, right after
+/// startup), never waiting for qBittorrent.
 async fn downloads(State(st): S) -> Json<Value> {
-    let list = st.lib.list().await;
-    if st.lib.checking_count.load(Ordering::Relaxed) > 0 {
-        st.subs.pause_background(); // let qBittorrent verify at full speed
-    }
-    for d in &list {
-        if d["done"] == json!(true) {
-            if let (Some(id), Some(index)) = (d["id"].as_str(), d["videos"][0]["index"].as_u64()) {
-                st.subs.prefetch(id, index);
+    let snapshot = st.downloads.read().unwrap().clone();
+    Json(Value::Array(snapshot.unwrap_or_else(|| st.lib.placeholders())))
+}
+
+/// Keeps the downloads snapshot fresh (every 2 s, or right away after a change) and runs the background work
+/// that depends on it.
+pub async fn refresh_downloads_forever(st: Arc<AppState>) {
+    loop {
+        let list = st.lib.list().await;
+        if st.lib.checking_count.load(Ordering::Relaxed) > 0 {
+            st.subs.pause_background(); // let qBittorrent verify at full speed
+        }
+        for d in &list {
+            // Full extraction of embedded subtitles reads the whole movie. MKV subtitles are picked out while
+            // playing instead, so only other formats get it in the background.
+            let video = &d["videos"][0];
+            if d["done"] == json!(true) && video["ext"] != ".mkv" {
+                if let (Some(id), Some(index)) = (d["id"].as_str(), video["index"].as_u64()) {
+                    st.subs.prefetch(id, index);
+                }
             }
         }
+        *st.downloads.write().unwrap() = Some(list);
+        tokio::select! {
+            _ = st.refresh_downloads.notified() => {}
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
     }
-    Json(Value::Array(list))
 }
 
 async fn add_download(State(st): S, Path(id): Path<String>, body: Option<Json<Value>>) -> ApiResult<Json<Value>> {
@@ -376,8 +394,17 @@ async fn add_download(State(st): S, Path(id): Path<String>, body: Option<Json<Va
         let name = b["name"].as_str().map(str::to_string).unwrap_or_else(|| format!("Torrent {id}"));
         let text = |k: &str| b[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
         st.lib.add(&id, &bytes, &name, text("imdb"), text("poster")).await?;
+        st.refresh_downloads.notify_one();
     }
-    let status = st.lib.list().await.into_iter().find(|d| d["id"] == id.as_str()).unwrap_or_else(|| json!({ "id": id }));
+    // answer right away; the next snapshot (moments later) has the full status
+    let status = st
+        .downloads
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|l| l.iter().find(|d| d["id"] == id.as_str()).cloned())
+        .or_else(|| st.lib.placeholders().into_iter().find(|d| d["id"] == id.as_str()))
+        .unwrap_or_else(|| json!({ "id": id }));
     Ok(Json(status))
 }
 
@@ -393,6 +420,10 @@ async fn remove_download(State(st): S, Path(id): Path<String>, Query(q): Q) -> A
     }
     st.progress.lock().unwrap().remove(&id);
     st.save_progress();
+    if let Some(list) = st.downloads.write().unwrap().as_mut() {
+        list.retain(|d| d["id"] != id.as_str());
+    }
+    st.refresh_downloads.notify_one();
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -588,7 +619,15 @@ async fn subtitle(State(st): S, Path((id, key)): Path<(String, String)>, Query(q
 
 async fn list_subs(State(st): S, Path(id): Path<String>, Query(q): Q) -> Json<Value> {
     let video = q.get("video").and_then(|v| v.parse().ok());
-    Json(Value::Array(st.subs.list(&id, video).await))
+    let snapshot = st.downloads.read().unwrap().as_ref().and_then(|l| l.iter().find(|d| d["id"] == id.as_str()).cloned());
+    let status = match snapshot {
+        Some(s) => s,
+        None => match st.lib.list().await.into_iter().find(|d| d["id"] == id.as_str()) {
+            Some(s) => s,
+            None => return Json(json!([])),
+        },
+    };
+    Json(Value::Array(st.subs.list(&id, &status, video).await))
 }
 
 async fn upload_sub(State(st): S, Path(id): Path<String>, Query(q): Q, body: Bytes) -> ApiResult<Json<Value>> {

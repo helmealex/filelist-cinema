@@ -208,11 +208,39 @@ impl Library {
         };
         self.checking_count
             .store(infos.iter().filter(|i| is_checking(i["state"].as_str().unwrap_or(""))).count(), Ordering::Relaxed);
-        let mut out = Vec::new();
-        for (id, hash) in ids {
+        // ask qBittorrent about all torrents at once: one slow answer shouldn't delay the others
+        let statuses = ids.iter().map(|(id, hash)| {
             let info = infos.iter().find(|i| i["hash"] == hash.as_str());
-            out.push(self.status(&id, info, error.as_deref()).await);
-        }
+            self.status(id, info, error.as_deref())
+        });
+        let mut out = futures_util::future::join_all(statuses).await;
+        out.sort_by_key(|d| std::cmp::Reverse(d["addedAt"].as_u64().unwrap_or(0)));
+        out
+    }
+
+    /// The library as known from library.json, before qBittorrent has answered (shown instantly at startup).
+    pub fn placeholders(&self) -> Vec<Value> {
+        let mut out: Vec<Value> = self
+            .entries
+            .read()
+            .unwrap()
+            .values()
+            .map(|e| {
+                let mut v = e.clone();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.extend([
+                        ("connecting".into(), json!(true)),
+                        ("ready".into(), json!(false)),
+                        ("progress".into(), json!(0)),
+                        ("done".into(), json!(false)),
+                        ("peers".into(), json!(0)),
+                        ("videos".into(), json!([])),
+                        ("subtitles".into(), json!([])),
+                    ]);
+                }
+                v
+            })
+            .collect();
         out.sort_by_key(|d| std::cmp::Reverse(d["addedAt"].as_u64().unwrap_or(0)));
         out
     }

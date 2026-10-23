@@ -9,6 +9,43 @@ use std::os::windows::process::CommandExt;
 
 /// Hide the console window of helper processes (ffmpeg, cmd) on Windows.
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Start a process outside the app's job object, so it keeps running after the app exits.
+pub const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
+/// Put the app in a Windows job object that kills every process it started (ffmpeg, ffprobe) when the app
+/// exits, however it exits: closing the console window or killing the process skips all cleanup code, and
+/// would otherwise leave ffmpeg reading tens of gigabytes in the background. qBittorrent and the browser are
+/// started with CREATE_BREAKAWAY_FROM_JOB, so they stay.
+#[cfg(windows)]
+pub fn kill_children_on_exit() {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: plain Win32 calls with valid arguments; the job handle is deliberately never closed, so Windows
+    // closes it when the app exits, which is what triggers killing the remaining child processes.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if ok != 0 {
+            AssignProcessToJobObject(job, GetCurrentProcess());
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn kill_children_on_exit() {}
 
 /// The app folder: next to the .exe, or the project folder under `cargo run`. Holds .env, data/ and downloads/.
 pub fn app_root() -> PathBuf {
@@ -283,6 +320,18 @@ mod tests {
 
 pub fn open_browser(url: &str) {
     if cfg!(windows) {
-        let _ = quiet_command("cmd").args(["/c", "start", "", url]).spawn();
+        let mut cmd = quiet_command("cmd");
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB); // the browser must outlive the app
+        let _ = cmd.args(["/c", "start", "", url]).spawn();
     }
+}
+
+/// Start a program that must keep running after the app exits (qBittorrent).
+pub fn spawn_detached(program: &Path) -> std::io::Result<std::process::Child> {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_BREAKAWAY_FROM_JOB);
+    cmd.spawn()
 }
